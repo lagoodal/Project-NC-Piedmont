@@ -1,1 +1,2017 @@
+---
+title: "Untitled"
+author: "Louis Goodall"
+date: "02/05/2022"
+output: pdf_document
+---
+
+```{r, echo = F, message = F}
+library(tidyverse)
+library(rFIA)
+library(ggrepel)
+library(raster)
+library(rgdal)
+library(fs)
+library(terra)
+library(sf)
+library(proj4)
+library(kableExtra)
+library(data.table)
+library(BRRR)
+library(gstat)
+```
+
+
+
+```{r}
+# Read in plot level latitude and longitude data for the Piedmont and Blue Ridge Mountains ecoregions. Excel sheet is from a previous project of mine where Piedmont & Blue Ridge Mountain plot locations were processed.
+LATLON <- read_csv('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Level 4 Co-ordinates/Level 4 Piedmont Co-ordinates.csv')
+```
+
+
+```{r}
+# Read in all FIA datatables for the state of NC
+fiaNC <- readFIA('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/FIA Data/NC_2021')
+
+######################################################
+# CLIP FIA DATA TO MOST RECENT
+fiaNC <- clipFIA(fiaNC, mostRecent = T)
+######################################################
+
+# Isolate the FIA_TREE table
+TREE <- fiaNC$TREE
+# # filter data to the last 15 years
+# TREE <- TREE %>%
+#   filter(INVYR %in% 2007:2022)
+# filter out plots located in the Piedmont Region and drop DIA NAs
+TREE <- inner_join(TREE, LATLON, by = c("COUNTYCD", "PLOT"))
+TREE <- TREE %>%
+  drop_na(DIA)
+# Calculate basal area for individual trees
+TREE <- TREE %>%
+  mutate(BA = (DIA^2)*0.005454)
+# Calculate basal area for entire plot
+TREE.TOTAL.BA <- TREE %>%
+  group_by(PLT_CN) %>%
+  summarise(PLOT_BA = sum(BA))
+# Join total PLOT_BA to TREE table
+TREE <- inner_join(TREE, TREE.TOTAL.BA, by = "PLT_CN")
+
+# rm(FortyFiveA, FortyFiveB, FortyFiveC, FortyFiveE, FortyFiveF, FortyFiveG, FortyFiveI, gg.50.BA, gg.50.BA.subA, gg.50.BA.subB, gg.50.BA.subC, gg.50.BA.subE, gg.50.BA.subF, gg.50.BA.subG, gg.50.BA.subI, gg.50.IVI, gg.50.IVI.subA, gg.50.IVI.subB, gg.50.IVI.subC, gg.50.IVI.subE, gg.50.IVI.subF, gg.50.IVI.subI, spp.110, spp.131, spp.132, spp.316, spp.403, spp.409, spp.531, spp.541, spp.611, spp.621, spp.711, spp.802, spp.806, spp.812, spp.832, spp.833, spp.835, spp.837, gg.50,IVI.subG, gg.percent, IVI, IVITop50, n.species.x, n.total.spp, perc10, perc20, perc30, perc40, perc50)
+```
+
+# IVI Calculation
+
+$$
+\frac{No Of Trees Of Species X}{No Of Trees Of All Species}+\frac{BA of Species X}{Total BA of The Species}
+$$
+
+```{r}
+# Uniquespecies<-unique(TREE$SPCD)
+# Tot_N_species<-length(Uniquespecies)
+# LandscapeDF<-NULL
+# AllBA<-sum(TREE$BA)
+# for(i in Uniquespecies) {
+#   # creates seperate blocks for the indiviudal tree species
+#   Block<-TREE[TREE$SPCD == i,]
+#   SumIVI<-sum(Block$IVI)
+#   SumBA<-sum(Block$BA)
+#   PercentTotal<-SumBA/AllBA
+#   Landscaperow<-cbind(i,SumIVI,SumBA,PercentTotal)
+#   LandscapeDF<-rbind(Landscaperow,LandscapeDF)
+# }
+# LandscapeDF<-data.frame(LandscapeDF)
+
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- TREE %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- TREE %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the landscape level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+# Place landscape perentage column into IVITop50
+IVITop50$PercentTotal <- BATop50$PercentTotal
+# Isolate the top x number of species 
+perc50 <- IVITop50
+perc40 <- perc50[1:40,]
+perc30 <- perc50[1:30,]
+perc20 <- perc50[1:20,]
+perc10 <- perc50[1:10,]
+# Create table out of total landscape presence percentages for x number of species
+fifty <- cbind(round(sum(perc50$PercentTotal), digits = 5), 50)
+fourty <- cbind(round(sum(perc40$PercentTotal), digits = 5), 40)
+thirty <- cbind(round(sum(perc30$PercentTotal), digits = 5), 30)
+twenty <- cbind(round(sum(perc20$PercentTotal), digits = 5), 20)
+ten <- cbind(round(sum(perc10$PercentTotal), digits = 5), 10)
+totalpercents <- as.data.frame(rbind(fifty,fourty,thirty,twenty,ten))
+colnames(totalpercents) <- c("Percent", "Species")
+```
+
+## Graphs
+
+```{r}
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI
+# Graph for top 50 spp. by BA
+gg.50.BA <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA
+
+gg.percent <- ggplot(totalpercents, aes(x = factor(Species), fill = as.numeric(Percent), y = as.numeric(Percent), label = sprintf("%0.2f", round(Percent, digits = 2)))) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  geom_label_repel(aes(label=(Percent), vjust = 1)) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "% of landscape")
+gg.percent
+```
+
+The top 10 species in the Piedmont Landscape by IVI are
+1. Loblolly pine (Pinus taeda) 131
+2. Sweetgum (Liquidambar styraciflua) 611
+3. Tulip-poplar (Lirodendron tulipifera) 621
+4. Red maple (Acer rubrum) 316
+5. Virginia pine (Pinus virginiana) 132
+6. White oak (Quercus alba) 802
+7. Sourwood (Oxydendrum arboreum) 711
+8. Shortleaf pine (Pinus echinata) 110
+9. Eastern redcedar (Juniperus virginiana) 68
+10. Black cherry (Prunus serotina) 762
+
+
+## Level 4 communities
+# Southern Inner Piedmont (45a)
+
+```{r}
+# Read the data in
+All.Co.ord <- read_csv('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Level 4 Co-ordinates/Level 4 Piedmont Co-ordinates.csv')
+# inner-join with Tree table
+All.Co.ord <- inner_join(TREE, All.Co.ord, by = c("LAT", "LON", "COUNTYCD", "PLOT"))
+# Filter for the specific subregion we are interested in
+FortyFiveA <- All.Co.ord %>%
+  filter(Subregion == "Southern Inner Piedmont")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveA %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveA %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subA <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subA
+# Graph for top 50 spp. by BA
+gg.50.BA.subA <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subA
+```
+
+The top 5 species by IVI in the Southern Inner Piedmont (45a) are:
+1. Loblolly pine (Pinus taeda) 131
+2. Virginia pine (Pinus virginiana) 132
+3. Tulip poplar (Lindodendron tulipifera) 621
+4. White oak (Quercus alba) 802
+5. Chestnut oak (Quercus prinus) 832
+
+# Southern Outer Piedmont (45b)
+
+```{r}
+# Filter for the specific subregion we are interested in
+FortyFiveB <- All.Co.ord %>%
+  filter(Subregion == "Southern Outer Piedmont")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveB %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveB %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subB <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subB
+# Graph for top 50 spp. by BA
+gg.50.BA.subB <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subB
+```
+
+The top 5 species by IVI in the Southern Outer Piedmont (45b) are:
+1. Sweetgum (Liquidambar stryaciflua) 611
+2. Tulip poplar (Lindodendron tulipifera) 621
+3. Red maple (Acer rubrum) 316
+4. Virginia pine (Pinus virginiana) 132
+5. Loblolly pine (Pinus taeda) 131
+
+# Carolina Slate Belt (45c)
+
+```{r}
+# Filter for the specific subregion we are interested in
+FortyFiveC <- All.Co.ord %>%
+  filter(Subregion == "Carolina Slate Belt")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveC %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveC %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subC <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subC
+# Graph for top 50 spp. by BA
+gg.50.BA.subC <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subC
+```
+
+The top 5 species by IVI in the Carolina Slate Belt (45c) are:
+1. Loblolly pine (Pinus taeda) 131
+2. Sweetgum (Liquidambar stryaciflua) 611
+3. Red maple (Acer rubrum) 316
+4. Tulip poplar (Lindodendron tuilpifera) 621
+5. White oak (Quercus alba) 802
+
+# Northern Inner Piedmont (45e)
+
+```{r}
+# Filter for the specific subregion we are interested in
+FortyFiveE <- All.Co.ord %>%
+  filter(Subregion == "Northern Inner Piedmont")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveE %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveE %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subE <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subE
+# Graph for top 50 spp. by BA
+gg.50.BA.subE <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subE
+```
+
+The top 5 species by IVI in the Northern Outer Piedmont (45e) are:
+1. Tulip poplar (Lindodendron tulipifera) 621
+2. Red maple (Acer rubrum) 316
+3. Virginia pine (Pinus virginiana) 132
+4. Sourwood (Oxydendrum arboreum) 711
+5. White oak (Quercus alba) 802
+
+# Northern Outer Piedmont (45f)
+
+```{r}
+# Filter for the specific subregion we are interested in
+FortyFiveF <- All.Co.ord %>%
+  filter(Subregion == "Northern Outer Piedmont")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveF %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveF %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subF <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subF
+# Graph for top 50 spp. by BA
+gg.50.BA.subF <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subF
+```
+
+The top 5 species by IVI in the Northern Outer Piedmont (45f) are:
+1. Loblolly pine (Pinus taeda) 131
+2. Sweetgum (Liquidambar stryaciflua) 611
+3. Tulip poplar (Lindodendron tulipifera) 621
+4. Red maple (Acer rubrum) 316
+5. White oak (Quercus alba) 802
+
+# Triassic Basins (45g)
+
+```{r}
+# Filter for the specific subregion we are interested in
+FortyFiveG <- All.Co.ord %>%
+  filter(Subregion == "Triassic Basins")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveE %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveE %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subG <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subG
+# Graph for top 50 spp. by BA
+gg.50.BA.subG <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subG
+```
+
+The top 5 species by IVI for the Triassic Basins (45g) are:
+1. Tulip poplar (Lindodendron tulipifera) 621
+2. Red maple (Acer rubrum) 316
+3. Virginia pine (Pinus virginiana) 132
+4. Sourwood (Oxydendrum arboreum) 711
+5. White oak (Quercus alba) 802
+
+# Kings Mountain (45i)
+
+```{r}
+# Filter for the specific subregion we are interested in
+FortyFiveI <- All.Co.ord %>%
+  filter(Subregion == "Kings Mountain")
+
+## Vectors needed in to generate the IVI 
+# Number of individual trees in species i in plot j
+n.species.x <- FortyFiveI %>%
+    group_by(PLT_CN, SPCD) %>%
+    summarise(n = n())
+# Total number of trees across all species
+n.total.spp <- n.species.x %>%
+  summarise(total = sum(n))
+# Basal area of species i in plot j
+BA.species.x <- FortyFiveI %>%
+  group_by(PLT_CN, SPCD) %>%
+  summarise(TOTAL.BA = sum(BA))
+# Total basal area of the species across all plots
+BA.total.spp <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total = sum(TOTAL.BA))
+
+# Sequence to join all the tables together
+IVI <- inner_join(n.species.x, n.total.spp, by = "PLT_CN")
+IVI <- inner_join(IVI, BA.species.x, by = c("PLT_CN", "SPCD"))
+IVI <- inner_join(IVI, BA.total.spp, by = "SPCD")
+# Change column names
+colnames(IVI) <- c("PLT_CN", "SPCD", "N_SPP_X", "TOTAL_PLT_SPP", "TOTAL_BA_X", "TOTAL_PLT_BA")
+# Calculate IVI for individual species in an individual plot
+IVI <- IVI %>%
+  mutate(IVI = (N_SPP_X/TOTAL_PLT_SPP) + (TOTAL_BA_X/TOTAL_PLT_BA))
+# Calculate the subregion level IVI by species
+IVI <- IVI %>%
+  group_by(SPCD) %>%
+  summarise(totalIVI = sum(IVI))
+
+## Top 50s
+# Top 50 IVI scores for the Peidmont landscape
+IVITop50 <- IVI[order(-IVI[,2]),] %>%
+  slice(1:50)
+# Total basal area by species
+SumBA <- BA.species.x %>%
+  group_by(SPCD) %>%
+  summarise(total.spp.BA = sum(TOTAL.BA))
+# Landscape level BA
+AllBA <- sum(BA.total.spp$total)
+# Create Top 50 BA tree table
+BATop50 <- SumBA
+# Calculate what percent of the landscape a species makes up based upon BA
+BATop50 <- BATop50 %>%
+  mutate(PercentTotal = total.spp.BA/AllBA)
+BATop50 <- BATop50[order(-BATop50[,3]),] %>%
+  slice(1:50)
+
+# Graph for top 50 spp. by IVI score
+gg.50.IVI.subI <- ggplot(IVITop50, aes(x = reorder(SPCD, -totalIVI), y = totalIVI, fill = totalIVI)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "IVI")
+gg.50.IVI.subI
+# Graph for top 50 spp. by BA
+gg.50.BA.subI <- ggplot(BATop50, aes(x = reorder(SPCD, -total.spp.BA), y = total.spp.BA, fill = total.spp.BA)) +
+  geom_bar(stat = "identity") +
+  geom_label_repel(aes(label = (SPCD), vjust = 1)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  xlab("") +
+  ylab("") +
+  labs(fill = "BA")
+gg.50.BA.subI
+
+rm(All.Co.ord)
+```
+
+The top 5 species by IVI for Kings Mountain (45i) are:
+1. Chestnut oak (Quercus prinus) 832
+2. Virginia pine (Pinus virginiana) 132
+3. Shortleaf pine (Pinus echinata) 110
+4. Sourwood (Oxydendrum arboreum) 711
+5. Red maple (Acer rubrum) 316
+
+
+# RASTER STUFF
+
+```{r}
+# Filter out species that have a basal area below 0.5% of the landscape
+# This leaves 29 species for the IC
+BATop50 <- BATop50 %>%
+  filter(PercentTotal > 0.005)
+# Read in Piedmont NC shapefile
+Piedmont.shp <- readOGR('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/NC Ecoregions & Projections/Level 3/nc_eco_l3.shp')
+# Read in shapefile with CRS = UTM 17N (North Carolina). This is to be used later on to match other shapefiles to this co-ordinates system
+WV.UTM17N <- readOGR('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/NC Ecoregions & Projections/WV Ecoregions/ecoregions_USFS_200002_utm83.shp')
+# Create an object that contains the UTM 17N projection
+utm17N <- CRS("+proj=utm +zone=17 +datum=NAD83 +units=m +no_defs")
+# Reproject the Piedmont shapefile into one that is UTM 17N
+Piedmont.shp <- spTransform(Piedmont.shp, crs(WV.UTM17N))
+
+
+# Create a vector which contains the USFS SPCD of the top 50 species in the Piedmont region by IVI
+species.list <- c(68,110,129,131,132,316,373,403,409,531,541,544,602,611,621,693,711,731,762,802,806,812,831,832,833,835,837,971,972)
+
+# Create a vector containing all of the Ty Wilson maps for the whole of the US
+file_paths <- fs::dir_ls('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Ty Wilson Maps/Piedmont Top 50 Species')
+# Create a empty list for the 49 rasters to then be placed into
+file_contents <- list()
+# Place the 49 rasters into the list object
+file_contents <- lapply(file_paths, raster)
+# Change the name of the rasters from their long pathname to the corresponding USFS SPCD
+names(file_contents) <- c('110',"121","126","129","131","132","261","311","313","316","341","373","391","403","407","409","462","471","491","521","531","541","544","591","602","611","621","68","682","693","701","711","731","762","802","806","812","827","831","832","833","835","837","901","922","931","971","972","975")
+# Change raster list name
+Piedmont.Rasters <- file_contents
+```
+
+
+```{r}
+# # Reproject the top 50 rasters into the UTM 17N projection
+# Piedmont.Rasters$`68` <- projectRaster(Piedmont.Rasters$`68`, crs = crs(utm17N))
+# Piedmont.Rasters$`110` <- projectRaster(Piedmont.Rasters$`110`, crs = crs(utm17N))
+# Piedmont.Rasters$`121` <- projectRaster(Piedmont.Rasters$`121`, crs = crs(utm17N))
+# Piedmont.Rasters$`126` <- projectRaster(Piedmont.Rasters$`126`, crs = crs(utm17N))
+# Piedmont.Rasters$`129` <- projectRaster(Piedmont.Rasters$`129`, crs = crs(utm17N))
+# Piedmont.Rasters$`131` <- projectRaster(Piedmont.Rasters$`131`, crs = crs(utm17N))
+# Piedmont.Rasters$`132` <- projectRaster(Piedmont.Rasters$`132`, crs = crs(utm17N))
+# Piedmont.Rasters$`261` <- projectRaster(Piedmont.Rasters$`261`, crs = crs(utm17N))
+# Piedmont.Rasters$`311` <- projectRaster(Piedmont.Rasters$`311`, crs = crs(utm17N))
+# Piedmont.Rasters$`313` <- projectRaster(Piedmont.Rasters$`313`, crs = crs(utm17N))
+# Piedmont.Rasters$`316` <- projectRaster(Piedmont.Rasters$`316`, crs = crs(utm17N))
+# Piedmont.Rasters$`341` <- projectRaster(Piedmont.Rasters$`341`, crs = crs(utm17N))
+# Piedmont.Rasters$`373` <- projectRaster(Piedmont.Rasters$`373`, crs = crs(utm17N))
+# Piedmont.Rasters$`391` <- projectRaster(Piedmont.Rasters$`391`, crs = crs(utm17N))
+# 
+# Piedmont.Rasters$`403` <- projectRaster(Piedmont.Rasters$`403`, crs = crs(utm17N))
+# Piedmont.Rasters$`407` <- projectRaster(Piedmont.Rasters$`407`, crs = crs(utm17N))
+# Piedmont.Rasters$`409` <- projectRaster(Piedmont.Rasters$`409`, crs = crs(utm17N))
+# Piedmont.Rasters$`462` <- projectRaster(Piedmont.Rasters$`462`, crs = crs(utm17N))
+# Piedmont.Rasters$`471` <- projectRaster(Piedmont.Rasters$`471`, crs = crs(utm17N))
+# Piedmont.Rasters$`491` <- projectRaster(Piedmont.Rasters$`491`, crs = crs(utm17N))
+# Piedmont.Rasters$`521` <- projectRaster(Piedmont.Rasters$`521`, crs = crs(utm17N))
+# Piedmont.Rasters$`531` <- projectRaster(Piedmont.Rasters$`531`, crs = crs(utm17N))
+# Piedmont.Rasters$`541` <- projectRaster(Piedmont.Rasters$`541`, crs = crs(utm17N))
+# Piedmont.Rasters$`544` <- projectRaster(Piedmont.Rasters$`544`, crs = crs(utm17N))
+# Piedmont.Rasters$`591` <- projectRaster(Piedmont.Rasters$`591`, crs = crs(utm17N))
+# Piedmont.Rasters$`602` <- projectRaster(Piedmont.Rasters$`602`, crs = crs(utm17N))
+# 
+# Piedmont.Rasters$`611` <- projectRaster(Piedmont.Rasters$`611`, crs = crs(utm17N))
+# Piedmont.Rasters$`621` <- projectRaster(Piedmont.Rasters$`621`, crs = crs(utm17N))
+# Piedmont.Rasters$`682` <- projectRaster(Piedmont.Rasters$`682`, crs = crs(utm17N))
+# Piedmont.Rasters$`693` <- projectRaster(Piedmont.Rasters$`693`, crs = crs(utm17N))
+# Piedmont.Rasters$`701` <- projectRaster(Piedmont.Rasters$`701`, crs = crs(utm17N))
+# Piedmont.Rasters$`711` <- projectRaster(Piedmont.Rasters$`711`, crs = crs(utm17N))
+# Piedmont.Rasters$`731` <- projectRaster(Piedmont.Rasters$`731`, crs = crs(utm17N))
+# Piedmont.Rasters$`762` <- projectRaster(Piedmont.Rasters$`762`, crs = crs(utm17N))
+# Piedmont.Rasters$`802` <- projectRaster(Piedmont.Rasters$`802`, crs = crs(utm17N))
+# 
+# Piedmont.Rasters$`806` <- projectRaster(Piedmont.Rasters$`806`, crs = crs(utm17N))
+# Piedmont.Rasters$`812` <- projectRaster(Piedmont.Rasters$`812`, crs = crs(utm17N))
+# Piedmont.Rasters$`827` <- projectRaster(Piedmont.Rasters$`827`, crs = crs(utm17N))
+# Piedmont.Rasters$`831` <- projectRaster(Piedmont.Rasters$`831`, crs = crs(utm17N))
+# Piedmont.Rasters$`832` <- projectRaster(Piedmont.Rasters$`832`, crs = crs(utm17N))
+# Piedmont.Rasters$`833` <- projectRaster(Piedmont.Rasters$`833`, crs = crs(utm17N))
+# Piedmont.Rasters$`835` <- projectRaster(Piedmont.Rasters$`835`, crs = crs(utm17N))
+# 
+# Piedmont.Rasters$`837` <- projectRaster(Piedmont.Rasters$`837`, crs = crs(utm17N))
+# Piedmont.Rasters$`901` <- projectRaster(Piedmont.Rasters$`901`, crs = crs(utm17N))
+# Piedmont.Rasters$`922` <- projectRaster(Piedmont.Rasters$`922`, crs = crs(utm17N))
+# Piedmont.Rasters$`931` <- projectRaster(Piedmont.Rasters$`931`, crs = crs(utm17N))
+# Piedmont.Rasters$`971` <- projectRaster(Piedmont.Rasters$`971`, crs = crs(utm17N))
+# Piedmont.Rasters$`972` <- projectRaster(Piedmont.Rasters$`972`, crs = crs(utm17N))
+# Piedmont.Rasters$`975` <- projectRaster(Piedmont.Rasters$`975`, crs = crs(utm17N))
+# # Piedmont.Rasters$`999` <- projectRaster(Piedmont.Rasters$`999`, crs = crs(utm17N))
+
+```
+
+
+```{r}
+# Crop Top 50 US rasters down to just the Piedmont
+# s68 <- crop(Piedmont.Rasters$`68`, Piedmont.shp)
+# s68 <- mask(s68, Piedmont.shp)
+# s110 <- crop(Piedmont.Rasters$`110`, Piedmont.shp)
+# s110 <- mask(s110, Piedmont.shp)
+# s121 <- crop(Piedmont.Rasters$`121`, Piedmont.shp)
+# s121 <- mask(s121, Piedmont.shp)
+# s126 <- crop(Piedmont.Rasters$`126`, Piedmont.shp)
+# s126 <- mask(s126, Piedmont.shp)
+# s129 <- crop(Piedmont.Rasters$`129`, Piedmont.shp)
+# s129 <- mask(s129, Piedmont.shp)
+# s131 <- crop(Piedmont.Rasters$`131`, Piedmont.shp)
+# s131 <- mask(s131, Piedmont.shp)
+# s132 <- crop(Piedmont.Rasters$`132`, Piedmont.shp)
+# s132 <- mask(s132, Piedmont.shp)
+# s261 <- crop(Piedmont.Rasters$`261`, Piedmont.shp)
+# s261 <- mask(s261, Piedmont.shp)
+# s311 <- crop(Piedmont.Rasters$`311`, Piedmont.shp)
+# s311 <- mask(s311, Piedmont.shp)
+# s313 <- crop(Piedmont.Rasters$`313`, Piedmont.shp)
+# s313 <- mask(s313, Piedmont.shp)
+# s316 <- crop(Piedmont.Rasters$`316`, Piedmont.shp)
+# s316 <- mask(s316, Piedmont.shp)
+# s341 <- crop(Piedmont.Rasters$`341`, Piedmont.shp)
+# s341 <- mask(s341, Piedmont.shp)
+# s373 <- crop(Piedmont.Rasters$`373`, Piedmont.shp)
+# s373 <- mask(s373, Piedmont.shp)
+# s391 <- crop(Piedmont.Rasters$`391`, Piedmont.shp)
+# s391 <- mask(s391, Piedmont.shp)
+# s403 <- crop(Piedmont.Rasters$`403`, Piedmont.shp)
+# s403 <- mask(s403, Piedmont.shp)
+# s407 <- crop(Piedmont.Rasters$`407`, Piedmont.shp)
+# s407 <- mask(s407, Piedmont.shp)
+# s409 <- crop(Piedmont.Rasters$`409`, Piedmont.shp)
+# s409 <- mask(s409, Piedmont.shp)
+# s462 <- crop(Piedmont.Rasters$`462`, Piedmont.shp)
+# s462 <- mask(s462, Piedmont.shp)
+# s471 <- crop(Piedmont.Rasters$`471`, Piedmont.shp)
+# s471 <- mask(s471, Piedmont.shp)
+# s491 <- crop(Piedmont.Rasters$`491`, Piedmont.shp)
+# s491 <- mask(s491, Piedmont.shp)
+# s521 <- crop(Piedmont.Rasters$`521`, Piedmont.shp)
+# s521 <- mask(s521, Piedmont.shp)
+# s531 <- crop(Piedmont.Rasters$`531`, Piedmont.shp)
+# s531 <- mask(s531, Piedmont.shp)
+# s541 <- crop(Piedmont.Rasters$`541`, Piedmont.shp)
+# s541 <- mask(s541, Piedmont.shp)
+# s544 <- crop(Piedmont.Rasters$`544`, Piedmont.shp)
+# s544 <- mask(s544, Piedmont.shp)
+# s591 <- crop(Piedmont.Rasters$`591`, Piedmont.shp)
+# s591 <- mask(s591, Piedmont.shp)
+# s602 <- crop(Piedmont.Rasters$`602`, Piedmont.shp)
+# s602 <- mask(s602, Piedmont.shp)
+# s611 <- crop(Piedmont.Rasters$`611`, Piedmont.shp)
+# s611 <- mask(s611, Piedmont.shp)
+# s621 <- crop(Piedmont.Rasters$`621`, Piedmont.shp)
+# s621 <- mask(s621, Piedmont.shp)
+# s682 <- crop(Piedmont.Rasters$`682`, Piedmont.shp)
+# s682 <- mask(s682, Piedmont.shp)
+# s693 <- crop(Piedmont.Rasters$`693`, Piedmont.shp)
+# s693 <- mask(s693, Piedmont.shp)
+# s701 <- crop(Piedmont.Rasters$`701`, Piedmont.shp)
+# s701 <- mask(s701, Piedmont.shp)
+# s711 <- crop(Piedmont.Rasters$`711`, Piedmont.shp)
+# s711 <- mask(s711, Piedmont.shp)
+# s731 <- crop(Piedmont.Rasters$`731`, Piedmont.shp)
+# s731 <- mask(s731, Piedmont.shp)
+# s762 <- crop(Piedmont.Rasters$`762`, Piedmont.shp)
+# s762 <- mask(s762, Piedmont.shp)
+# s802 <- crop(Piedmont.Rasters$`802`, Piedmont.shp)
+# s802 <- mask(s802, Piedmont.shp)
+# s806 <- crop(Piedmont.Rasters$`806`, Piedmont.shp)
+# s806 <- mask(s806, Piedmont.shp)
+# s812 <- crop(Piedmont.Rasters$`812`, Piedmont.shp)
+# s812 <- mask(s812, Piedmont.shp)
+# s827 <- crop(Piedmont.Rasters$`827`, Piedmont.shp)
+# s827 <- mask(s827, Piedmont.shp)
+# s831 <- crop(Piedmont.Rasters$`831`, Piedmont.shp)
+# s831 <- mask(s831, Piedmont.shp)
+# s832 <- crop(Piedmont.Rasters$`832`, Piedmont.shp)
+# s832 <- mask(s832, Piedmont.shp)
+# s833 <- crop(Piedmont.Rasters$`833`, Piedmont.shp)
+# s833 <- mask(s833, Piedmont.shp)
+# s835 <- crop(Piedmont.Rasters$`835`, Piedmont.shp)
+# s835 <- mask(s835, Piedmont.shp)
+# s837 <- crop(Piedmont.Rasters$`837`, Piedmont.shp)
+# s837 <- mask(s837, Piedmont.shp)
+# s901 <- crop(Piedmont.Rasters$`901`, Piedmont.shp)
+# s901 <- mask(s901, Piedmont.shp)
+# s922 <- crop(Piedmont.Rasters$`922`, Piedmont.shp)
+# s922 <- mask(s922, Piedmont.shp)
+# s931 <- crop(Piedmont.Rasters$`931`, Piedmont.shp)
+# s931 <- mask(s931, Piedmont.shp)
+# s971 <- crop(Piedmont.Rasters$`971`, Piedmont.shp)
+# s971 <- mask(s971, Piedmont.shp)
+# s972 <- crop(Piedmont.Rasters$`972`, Piedmont.shp)
+# s972 <- mask(s972, Piedmont.shp)
+# s975 <- crop(Piedmont.Rasters$`975`, Piedmont.shp)
+# s975 <- mask(s975, Piedmont.shp)
+# # s999 <- crop(Piedmont.Rasters$`999`, Piedmont.shp)
+# # s999 <- mask(s999, Piedmont.shp)
+
+# Stack Top 49 layers into one cohesive raster
+Piedmont.stack <- raster::stack(s68,s110,s121,s126,s129,s131,s132,s261,s311,s313,s316,s341,s373,s391,s403,s407,s409,s462,s471,s491,s521,s531,s541,s544,s591,s602,s611,s621,s682,s693,s701,s711,s731,s762,s802,s806,s812,s827,s831,s832,s833,s835,s837,s901,s922,s931,s971,s972,s975)
+# rm(s68,s110,s121,s126,s129,s131,s132,s261,s311,s313,s316,s341,s373,s391,s403,s407,s409,s462,s471,s491,s521,s531,s541,s544,s591,s602,s611,s621,s682,s693,s701,s711,s731,s762,s802,s806,s812,s827,s831,s832,s833,s835,s837,s901,s922,s931,s971,s972,s975)
+# plot(Piedmont.stack)
+
+# writeRaster(s999, 's999.tif', overwrite = T, NAflag = -999)
+plot(Piedmont.Rasters$`110`)
+
+# Piedmont.stack <- Piedmont.stack[[c(28,1,4,5,6,10,12,14,16,21,22,23,25,26,27,30,32,33,34,35,36,37,39,40,41,42,43,47,48)]]
+```
+
+# FIA Data
+
+```{r}
+# # Create FIA data frame from TREE data frame
+# FIA <- TREE
+# # Filter out the species of interest (Top 50 by IVI)
+# FIA <- FIA %>%
+#   filter(SPCD %in% species.list)
+# # Extract unique plot numbers
+# uniquePLT.CN <- unique(FIA$PLT_CN)
+# # Order data y DIA in a descending order
+# FIA <- FIA[order(-FIA$DIA),]
+
+# Five.States <- fread('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/FIA Data/5 States/fia.Five.States.csv')
+# Five.States <- Five.States[,c(1,2,3,4,5,6,7,8,9,10,11,12,16,17,18,19,20,21,22,23,111,121)]
+# Five.States <- as.data.frame(Five.States)
+# Five.States <- sapply(Five.States, as.numeric)
+# Five.States <- as.data.frame(Five.States)
+
+
+# Five.States <- as.data.frame(Five.States)
+# Five.States <- Five.States %>%
+#   select(CN, PLT_CN, INVYR, STATECD, UNITCD, COUNTYCD, PLOT, SUBP, TREE, CONDID, STATUSCD, SPCD, SPGRPCD, DIA, DIAHTCD, HT, HTCD, ACTUALHT, TPA_UNADJ, CARBON_AG)
+# Five.States <- sapply(Five.States, as.numeric)
+# Five.States <- as.data.frame(Five.States)
+
+# Read in TREE Table data from NC and the 4 surrounding states which touch NC (GA, VA, SC, TN)
+Five.States <- read_csv('/Users/louisgoodall/Desktop/For Zac/FIA.Five.States 2.csv')
+# Five.States <- read_csv("/Users/louisgoodall/Desktop/FIA.Five.States.csv")
+# Filter out the species of interest (Top 50 by IVI)
+FIA <- Five.States %>%
+  filter(SPCD %in% species.list)
+# Extract unique plot numbers
+uniquePLT.CN <- unique(FIA$PLT_CN)
+# Order data y DIA in a descending order
+FIA <- FIA[order(-FIA$DIA),]
+
+unique(Five.States$INVYR)
+
+# Loop to generate basal area from diameter values 
+Plt_Df <- NULL
+for (i in 1:length(uniquePLT.CN)){
+  two <- NULL
+  end <- NULL
+  Plot <- uniquePLT.CN[i]
+  FIA.BA <- FIA[FIA$PLT_CN==uniquePLT.CN[i],]
+  JUVI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==68]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==68])
+  PIEC <- sum(((FIA.BA$DIA[FIA.BA$SPCD==110]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==110])
+  PIPA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==121]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==121])
+  PIRI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==126]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==126])
+  PIST <- sum(((FIA.BA$DIA[FIA.BA$SPCD==129]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==129])
+  PITA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==131]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==131])
+  PIVI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==132]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==132])
+  TSCA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==261]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==261])
+  ACBA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==311]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==311])
+  ACNE <- sum(((FIA.BA$DIA[FIA.BA$SPCD==313]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==313])
+  ACRU <- sum(((FIA.BA$DIA[FIA.BA$SPCD==316]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==316])
+  AIAL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==341]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==341])
+  BENI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==373]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==373])
+  CACA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==391]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==391])
+  CAGL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==403]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==403])
+  CAOV <- sum(((FIA.BA$DIA[FIA.BA$SPCD==407]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==407])
+  CAAL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==409]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==409])
+  CEOC <- sum(((FIA.BA$DIA[FIA.BA$SPCD==462]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==462])
+  CECA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==471]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==471])
+  COFL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==491]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==491])
+  DIVI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==521]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==521])
+  FAGR <- sum(((FIA.BA$DIA[FIA.BA$SPCD==531]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==531])
+  FRAM <- sum(((FIA.BA$DIA[FIA.BA$SPCD==541]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==541])
+  FRPE <- sum(((FIA.BA$DIA[FIA.BA$SPCD==544]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==544])
+  ILOP <- sum(((FIA.BA$DIA[FIA.BA$SPCD==591]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==591])
+  JUNI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==602]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==602])
+  LIST <- sum(((FIA.BA$DIA[FIA.BA$SPCD==611]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==611])
+  LITU <- sum(((FIA.BA$DIA[FIA.BA$SPCD==621]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==621])
+  MORU <- sum(((FIA.BA$DIA[FIA.BA$SPCD==682]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==682])
+  NYSY <- sum(((FIA.BA$DIA[FIA.BA$SPCD==693]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==693])
+  OSVI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==701]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==701])
+  OXAR <- sum(((FIA.BA$DIA[FIA.BA$SPCD==711]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==711])
+  PLOC <- sum(((FIA.BA$DIA[FIA.BA$SPCD==731]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==731])
+  PRSE <- sum(((FIA.BA$DIA[FIA.BA$SPCD==762]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==762])
+  QUAL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==802]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==802])
+  QUCO <- sum(((FIA.BA$DIA[FIA.BA$SPCD==806]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==806])
+  QUFA <- sum(((FIA.BA$DIA[FIA.BA$SPCD==812]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==812])
+  QUNI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==827]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==827])
+  QUPH <- sum(((FIA.BA$DIA[FIA.BA$SPCD==831]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==831])
+  QUPR <- sum(((FIA.BA$DIA[FIA.BA$SPCD==832]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==832])
+  QURU <- sum(((FIA.BA$DIA[FIA.BA$SPCD==833]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==833])
+  QUST <- sum(((FIA.BA$DIA[FIA.BA$SPCD==835]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==835])
+  QUVE <- sum(((FIA.BA$DIA[FIA.BA$SPCD==837]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==837])
+  ROPS <- sum(((FIA.BA$DIA[FIA.BA$SPCD==901]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==901])
+  SANI <- sum(((FIA.BA$DIA[FIA.BA$SPCD==922]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==922])
+  SAAL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==931]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==931])
+  ULAL <- sum(((FIA.BA$DIA[FIA.BA$SPCD==971]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==971])
+  ULAM <- sum(((FIA.BA$DIA[FIA.BA$SPCD==972]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==972])
+  ULRU <- sum(((FIA.BA$DIA[FIA.BA$SPCD==975]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==975])
+  # UNKN <- sum(((FIA.BA$DIA[FIA.BA$SPCD==999]^2)*0.005454)*FIA.BA$TPA_UNADJ[FIA.BA$SPCD==999])
+  row <- cbind(Plot,JUVI,PIEC,PIPA,PIRI,PIST,PITA,PIVI,TSCA,ACBA,ACNE,ACRU,AIAL,BENI,CACA,CAGL,CAOV,CAAL,CEOC,CECA,COFL,DIVI,FAGR,FRAM,FRPE,ILOP,JUNI,LIST,LITU,MORU,NYSY,OSVI,OXAR,PLOC,PRSE,QUAL,QUCO,QUFA,QUNI,QUPH,QUPR,QURU,QUST,QUVE,ROPS,SANI,SAAL,ULAL,ULAM,ULRU)
+  Plt_Df <- rbind(Plt_Df, row)
+}
+skrrrahh(4)
+# Sum each row for index
+Plt_Df_Sums <- rowSums(Plt_Df[,-1])
+Plt_Df_2 <- cbind(Plt_Df, Plt_Df_Sums)
+Plt_CN <- Plt_Df_2[,1]
+Plt_Df_2 <- Plt_Df[,-1]
+Plt_Df_2 <- cbind(Plt_Df_2, Plt_CN)
+Plt_Df_2 <- as.data.frame(Plt_Df_2)
+Plt_Df_2
+# write_csv(Plt_Df_2, "/Users/louisgoodall/Desktop/Plt_Df_2.csv")
+
+# Find out which cells in the Piedmont.stack (Piedmont raster stack) have values  
+has.data <- which(!is.na(getValues(max(Piedmont.stack, na.rm=TRUE))))
+# Find out length of the number of cells
+N.has.data <- length(has.data)
+# Create data frame for Piedmont Raster Stack
+Piedmont.stack.df <- as.data.frame(Piedmont.stack)
+# Clear the rasters
+# rm(s68,s110,s121,s126,s129,s131,s132,s261,s311,s313,s316,s341,s373,s391,s403,s407,s409,s462,s471,s491,s521,s531,s541,s544,s591,s602,s611,s621,s682,s693,s701,s711,s731,s762,s802,s806,s812,s827,s831,s832,s833,s835,s837,s901,s922,s931,s971,s972,s975,s999)
+# Count how many locations contain data
+count1 <- as.data.frame(rowSums(Piedmont.stack.df[,1:11]))
+N_zeros_indataframe <- sum(is.na(count1))
+N_zero_and_hasdata <- sum(N_zeros_indataframe,N.has.data)
+NumberofRaster <- nrow(Piedmont.stack.df)
+# Extract data for each cell of the raster stack
+cr <- extract(Piedmont.stack, c(1: ncell(Piedmont.stack)))
+# Turn it into a data frame
+Piedmont.Rasters.df <- as.data.frame(cr)
+
+# write_csv(as.data.frame(cr), "/Users/louisgoodall/Desktop/cr.csv")
+```
+
+
+```{r}
+# Create a threshold for which to remove low proportion trees
+# This was done out of caution in regards to making sure that trees with a low basal area are not over distributed
+# Original threshold was 0.5, but that removed too many trees from the landscape due to it being less than Sumper
+Threshold <- 0
+cr_bi <- cr
+Sum <- rowSums(cr_bi)
+
+# Calculate total basal area for each row
+totalBA <- sum(Sum, na.rm = T)
+cr_bi <- cbind(cr_bi,Sum)
+Sumper <- Sum*Threshold
+cr_bi <- cbind(cr_bi,Sumper)
+# View(as.data.frame(cr_bi))
+test1 <- cr_bi[459415,]
+cr_bi[cr_bi < Sumper] <- 0
+# View(as.data.frame(cr_bi[459415,]))
+# Remove Sumper column
+cr_bi <- as.data.frame(cr_bi[,-51])
+test1 <- as.data.frame(cr_bi[459415,])
+
+# Create a marker to locate each raster cell
+Marker <- as.data.frame(1:nrow(cr))
+cr_bi <- cbind(cr_bi, Marker)
+# Create the data frame and change column names
+colnames(cr_bi) <- c("JUVI","PIEC","PIPA","PIRI","PIST","PITA","PIVI","TSCA","ACBA","ACNE","ACRU","AIAL","BENI","CACA","CAGL","CAOV","CAAL","CEOC","CECA","COFL","DIVI","FAGR","FRAM","FRPE","ILOP","JUNI","LIST","LITU","MORU","NYSY","OSVI","OXAR","PLOC","PRSE","QUAL","QUCO","QUFA","QUNI","QUPH","QUPR","QURU","QUST","QUVE","ROPS","SANI","SAAL","ULAL","ULAM","ULRU", "Sum", "Cell")
+# Isolate all the empty cells so that we don't need to process them
+zeros=cr_bi[(cr_bi[,1]==0 &cr_bi[,2]==0&
+                   cr_bi[,3]==0&
+                   cr_bi[,4]==0&
+                   cr_bi[,5]==0&
+                   cr_bi[,6]==0&
+                   cr_bi[,7]==0&
+                   cr_bi[,8]==0&
+                   cr_bi[,9]==0&
+                   cr_bi[,10]==0&
+                   cr_bi[,11]==0&
+                  cr_bi[,12]==0&
+                  cr_bi[,13]==0&
+               cr_bi[,14]==0&
+               cr_bi[,15]==0&
+               cr_bi[,16]==0&
+               cr_bi[,17]==0&
+               cr_bi[,18]==0&
+               cr_bi[,19]==0&
+               cr_bi[,20]==0&
+               cr_bi[,21]==0&
+               cr_bi[,22]==0&
+               cr_bi[,23]==0&
+               cr_bi[,24]==0&
+               cr_bi[,25]==0&
+               cr_bi[,26]==0&
+               cr_bi[,27]==0&
+               cr_bi[,28]==0&
+               cr_bi[,29]==0&
+               cr_bi[,30]==0&
+               cr_bi[,31]==0&
+               cr_bi[,32]==0&
+               cr_bi[,33]==0&
+               cr_bi[,34]==0&
+               cr_bi[,35]==0&
+               cr_bi[,36]==0&
+               cr_bi[,37]==0&
+               cr_bi[,38]==0&
+               cr_bi[,39]==0&
+               cr_bi[,40]==0&
+               cr_bi[,41]==0&
+               cr_bi[,42]==0&
+               cr_bi[,43]==0&
+               cr_bi[,44]==0&
+               cr_bi[,45]==0&
+               cr_bi[,46]==0&
+               cr_bi[,47]==0&
+               cr_bi[,48]==0&
+               cr_bi[,49]==0&
+               cr_bi[,50]==0),]
+
+
+cr_bi_spp <- cr_bi[!(cr_bi[,1]==0 &cr_bi[,2]==0&
+                    cr_bi[,3]==0&
+                    cr_bi[,4]==0&
+                    cr_bi[,5]==0&
+                    cr_bi[,6]==0&
+                    cr_bi[,7]==0&
+                    cr_bi[,8]==0&
+                    cr_bi[,9]==0&
+                    cr_bi[,10]==0&
+                    cr_bi[,11]==0&
+                    cr_bi[,12]==0&
+                    cr_bi[,13]==0&
+                    cr_bi[,14]==0&
+                    cr_bi[,15]==0&
+                    cr_bi[,16]==0&
+                    cr_bi[,17]==0&
+                    cr_bi[,18]==0&
+                    cr_bi[,19]==0&
+                    cr_bi[,20]==0&
+                    cr_bi[,21]==0&
+                    cr_bi[,22]==0&
+                    cr_bi[,23]==0&
+                    cr_bi[,24]==0&
+                    cr_bi[,25]==0&
+                    cr_bi[,26]==0&
+                    cr_bi[,27]==0&
+                    cr_bi[,28]==0&
+                    cr_bi[,29]==0&
+                    cr_bi[,30]==0&
+                    cr_bi[,31]==0&
+                    cr_bi[,32]==0&
+                    cr_bi[,33]==0&
+                    cr_bi[,34]==0&
+                    cr_bi[,35]==0&
+                    cr_bi[,36]==0&
+                    cr_bi[,37]==0&
+                    cr_bi[,38]==0&
+                    cr_bi[,39]==0&
+                    cr_bi[,40]==0&
+                    cr_bi[,41]==0&
+                    cr_bi[,42]==0&
+                    cr_bi[,43]==0&
+                    cr_bi[,44]==0&
+                    cr_bi[,45]==0&
+                    cr_bi[,46]==0&
+                    cr_bi[,47]==0&
+                    cr_bi[,48]==0&
+                    cr_bi[,49]==0&
+                    cr_bi[,50]==0),]
+cr_bi_spp <- cr_bi_spp %>%
+  drop_na()
+####Do those two add up? they should
+nrow(zeros) + nrow(cr_bi_spp)
+cr_bi_spp <- as.data.frame(cr_bi_spp)
+rm(cr)
+
+# write_csv(cr_bi_spp, "/Users/louisgoodall/Desktop/cr_bi_spp_0.csv")
+# write_csv(Plt_Df_2, "/Users/louisgoodall/Desktop/Plt_Df_2.csv")
+```
+
+
+
+```{r}
+# Break cr_bi_spp up into subsets so that processing is easier
+breaktest <- cr_bi_spp[100000:100100,]
+breaklist1 <- cr_bi_spp[1:99999,]
+breaklist2 <- cr_bi_spp[100000:199999,]
+breaklist3 <- cr_bi_spp[200000:299999,]
+breaklist4 <- cr_bi_spp[300000:399999,]
+breaklist5 <- cr_bi_spp[400000:499999,]
+breaklist6 <- cr_bi_spp[500000:599999,]
+breaklist7 <- cr_bi_spp[600000:699999,]
+breaklist8 <- cr_bi_spp[700000:741059,]
+
+
+####This is the New_Sorensons_Similarity_function
+New_Sorensons_Similarity<-function(Break,Plt_Df_2){####Break is just our cr_bi_spp broken down for speed
+  ####Plt_DF_2 is the FIA product above
+  ###Create Null objects to feed
+   Log<-NULL
+   Output<-NULL
+   # Break<- breaklist1
+   
+   # j = 2
+   # i = 2
+   
+   for(j in 1:nrow(Break)){
+    print(j) 
+    ##Each raster cell
+    practice<-Break[j,]
+    cell<-practice$Cell
+    #print(cell)
+    ####Get just the trees, no sums
+    Sample1 <- Plt_Df_2
+    Sample1$Sum=rowSums(Sample1[,-50]) ### Also this 
+    Sample2<-practice[,c(-50,-51)] ### This is the change that needs to be made
+    DeltaSamples<-NULL
+    ###Preforming the Indexing
+    if(!is.null(nrow(Sample2))){
+      for(i in 2:length(Sample2)){
+        #The top half of the function
+        ###is a iterable maximum function.
+        absw=abs(Sample2[,i]-Sample1[,i])
+        mixed<-(Sample2[,i]+Sample1[,i])
+        top<-(mixed-absw)
+        halfed=.5*top
+        DeltaSamples<-cbind(DeltaSamples,halfed)
+
+      }
+    }
+    ###The sum of Top
+    Top<-rowSums(DeltaSamples)
+    ###The sum of bottom     
+    Bottom<-Sample1$Sum+practice[,50]
+    ###The index
+    index<-Top/Bottom
+    #print(index)
+    ###Assign each site its index
+    Plt_indexed<-cbind(Plt_Df_2,index)
+    ###Find the one with the highest index
+    Closestplot<-Plt_indexed%>%
+                filter(index==max(index,na.rm = TRUE))#%>%
+    Closestplot<-Closestplot[round(runif(1,1,nrow(Closestplot))),]
+               #dplyr::select(Plt_CN)##(Plt_indexed$Plt_CN[Plt_indexed[,52]==max(Plt_indexed[,52],na.rm = TRUE)])
+    #Record the score
+    indexscore<-max(index,na.rm = TRUE)
+    ###Create a row of the cell, its assinged plot and the score
+    row<-cbind(cell,Closestplot$Plt_CN, Closestplot$index)    
+    Output<-rbind(row,Output)
+    ###This is for analysis log
+    row2<-cbind(j,indexscore,Sample2)
+    row3<-cbind(j,indexscore, Closestplot)
+   colnames(row3)<-c("iteration","index","JUVI","PIEC","PIPA","PIRI","PIST","PITA","PIVI","TSCA","ACBA","ACNE","ACRU","AIAL","BENI","CACA","CAGL","CAOV","CAAL","CEOC","CECA","COFL","DIVI","FAGR","FRAM","FRPE","ILOP","JUNI","LIST","LITU","MORU","NYSY","OSVI","OXAR","PLOC","PRSE","QUAL","QUCO","QUFA","QUNI","QUPH","QUPR","QURU","QUST","QUVE","ROPS","SANI","SAAL","ULAL","ULAM","ULRU",'PLT_CN',"index")
+   colnames(row2)<-c("iteration","index","JUVI","PIEC","PIPA","PIRI","PIST","PITA","PIVI","TSCA","ACBA","ACNE","ACRU","AIAL","BENI","CACA","CAGL","CAOV","CAAL","CEOC","CECA","COFL","DIVI","FAGR","FRAM","FRPE","ILOP","JUNI","LIST","LITU","MORU","NYSY","OSVI","OXAR","PLOC","PRSE","QUAL","QUCO","QUFA","QUNI","QUPH","QUPR","QURU","QUST","QUVE","ROPS","SANI","SAAL","ULAL","ULAM","ULRU")
+    
+    
+    Log<-rbind(Log,row3)
+    
+    
+  }
+  
+  return(list(Output,Log))
+}
+
+
+# Run the similarity index onto the broken up chunks of the cr_bi_spp
+options(scipen=999)
+TESTING <- New_Sorensons_Similarity(breaktest, Plt_Df_2)
+length(unique(Plt_Df_2$Plt_CN))
+
+FirstSection <- New_Sorensons_Similarity(breaklist1, Plt_Df_2)
+SecondSection <- New_Sorensons_Similarity(breaklist2, Plt_Df_2)
+ThirdSection <- New_Sorensons_Similarity(breaklist3, Plt_Df_2)
+FourthSection <- New_Sorensons_Similarity(breaklist4, Plt_Df_2)
+FifthSection <- New_Sorensons_Similarity(breaklist5, Plt_Df_2)
+SixthSection <- New_Sorensons_Similarity(breaklist6, Plt_Df_2)
+SeventhSection <- New_Sorensons_Similarity(breaklist7, Plt_Df_2)
+EighthSection <- New_Sorensons_Similarity(breaklist8, Plt_Df_2)
+
+#Extract the Output and the Log
+Output <- rbind(as.data.frame(FirstSection[1]),as.data.frame(SecondSection[1]),as.data.frame(ThirdSection[1]),
+              as.data.frame(FourthSection[1]),as.data.frame(FifthSection[1]),as.data.frame(SixthSection[1]),
+              as.data.frame(SeventhSection[1]),as.data.frame(EighthSection[1]))
+# Change the name of the second column
+colnames(Output)[2] <- "Closestplot"
+# Check how many unique PLT_CNs there are (92)
+length(unique(Output$Closestplot))
+Log <- rbind(as.data.frame(FirstSection[2]),as.data.frame(SecondSection[2]),as.data.frame(ThirdSection[2]),
+            as.data.frame(FourthSection[2]),as.data.frame(FifthSection[2]),as.data.frame(SixthSection[2]),
+            as.data.frame(SeventhSection[2]),as.data.frame(EighthSection[2]))
+
+
+unique(Output$Closestplot)
+unique(Log$PLT_CN)
+
+# Output <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Output.csv")
+# Log <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Log.csv")
+```
+
+
+
+```{r}
+NewOutput <- Output[!duplicated(Output$cell),]
+colnames(NewOutput)[3] <- "indexscore"
+# NewOutput <- NewOutput[,-1]
+# Return the zero cells
+zeroscells <- as.data.frame(zeros$Cell)
+zeroscellsPLT_CN = 0
+zeroscellsx <- 0
+zeroscellsindex <- 0
+zerobind <- cbind(zeroscells, zeroscellsPLT_CN, zeroscellsindex)
+colnames(zerobind) <- c("cell", "Closestplot", "indexscore")
+
+Output2 <- rbind(zerobind, NewOutput)
+Output2 <- Output2[order(Output2$cell, decreasing = FALSE),]
+
+listofoccupied <- cr_bi$Cell
+listoffinal <- Output2$cell
+# Fill in any missing cells
+missing <- listofoccupied[!(listofoccupied %in% Output2$cell)]
+missingrow <- cbind(missing, "0", "0")
+colnames(missingrow) <- c("cell", "Closestplot", "indexscore")
+
+length(missing)
+
+Output3 <- rbind(Output2, missingrow)
+Output4 <- Output3[order(as.numeric(Output3$cell), decreasing = F),]
+
+# write_csv(Output4, "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Output4.csv")
+```
+
+
+
+### Height Age and Site Index Association
+
+```{r}
+SPLUT <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Age_From_FIA/SpeciesLUT.csv")
+SP_print <- SPLUT[,c(2,4,7,8,9,10,11)]
+colnames(SP_print)[2] <- c("Species Name")
+kable(SP_print[c(0:10),], align = c('1'))
+```
+
+
+```{r}
+# GA_TREE <- fread("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/GA_TREE.csv")
+# NC_TREE <- fread("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/NC_TREE.csv")
+# SC_TREE <- fread("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/SC_TREE.csv")
+# TN_TREE <- fread("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/TN_TREE.csv")
+# VA_TREE <- fread("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/VA_TREE.csv")
+# 
+# GA_TREE <- as.data.frame(GA_TREE)
+# NC_TREE <- as.data.frame(NC_TREE)
+# SC_TREE <- as.data.frame(SC_TREE)
+# TN_TREE <- as.data.frame(TN_TREE)
+# VA_TREE <- as.data.frame(VA_TREE)
+
+# write_csv(Plotdata, "/Users/louisgoodall/Desktop/Plotdata.csv")
+```
+
+
+
+
+
+```{r}
+# Remove scientific notation in printing. PLT_CNs are long
+options(scipen=999)
+# Load in Sorensens analysis
+Plotdata <- Output
+# Create object with closest plots (PLT_CNs) from the Sorensen data
+ICcount <- unique(Plotdata$Closestplot)
+
+# Check how many there are (8404)
+print(length(ICcount))
+# Load in plots in the area of interest
+tree_data_all <- Five.States
+length(unique(tree_data_all$PLT_CN))
+tree_data_all[is.na(tree_data_all)] <- 0
+# Remove trees that do not have a height. Height is needed to estimate age. There was no change
+tree_data_HT <- subset(tree_data_all, tree_data_all[, 'HT'] > 0)
+length(unique(tree_data_HT$PLT_CN))
+rm(tree_data_all)
+
+# Only use recent years
+years <- unique(tree_data_HT$INVYR)
+tree_data_SelectYears <- tree_data_HT[tree_data_HT$INVYR %in% years,]
+# Get Plots for years
+tree_data_SelectPlots <- tree_data_SelectYears[tree_data_SelectYears$PLT_CN %in% ICcount,]
+PLT_CN_unique_trees <- unique(tree_data_SelectPlots[, "PLT_CN"])
+
+spp_file <- SPLUT
+spp <- spp_file[, "Species"]
+# colnames(spp) <- "SPCD"
+length(spp$Species)
+colnames(spp_file)[4] <- "X"
+# Find the species of interest
+tree_data_Selectspp <- tree_data_SelectPlots[tree_data_SelectPlots$SPCD %in% spp$Species,]
+PLT_CN_unique_spp_vector <- unique(tree_data_Selectspp$PLT_CN)
+print(length(PLT_CN_unique_spp_vector))
+rm(tree_data_SelectPlots, tree_data_SelectYears)
+
+# Read in COND tables for the 5 States
+# NC_COND <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/COND/NC_COND.csv")
+# SC_COND <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/COND/SC_COND.csv")
+# VA_COND <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/COND/VA_COND.csv")
+# TN_COND <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/COND/TN_COND.csv")
+# GA_COND <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/COND/GA_COND.csv")
+# COND_all <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/COND_all.csv")
+# Bind them all together
+# COND_all <- rbind(NC_COND, VA_COND, SC_COND, GA_COND, TN_COND)
+# Now only the years that we want
+COND_only_years <- COND_all[COND_all$INVYR %in% years,]
+# Remove plots that are not forested. COND class 1 is forested
+COND_only_forests <- COND_only_years %>%
+  filter(COND_STATUS_CD == 1)
+length(unique(COND_only_forests$PLT_CN))
+
+# Use this code to fill in the missing data, i.e. the average index for the entire landscape
+ForestwithIndex <- COND_only_forests[!is.na(COND_only_forests$SICOND),]
+average_Site_Condition <- round(mean(ForestwithIndex$SICOND), digits =)
+# USe this this calculate the average stand age and site index and fill in missing data
+COND_matrix <- NULL
+for (z in PLT_CN_unique_trees) { # Use $PLT_CN for non data.table/fread use
+  print(z)
+  each_plot_subset <- subset(COND_only_forests, COND_only_forests[,"PLT_CN"] == z)
+  number_plots <- nrow(each_plot_subset)
+  stand_age_mean <- mean(each_plot_subset$STDAGE) # summing across the cohort
+  site_index_avg <- mean(each_plot_subset$SICOND) # summing across the cohort
+  if (number_plots == 0){
+    site_index_mean <- average_Site_Condition
+  } else {
+    site_index_mean <- site_index_avg
+  }
+  plot_matrix <- cbind(z, stand_age_mean, site_index_mean)
+  colnames(plot_matrix) <- c("PLT_CN", "STDAGE_mean", "SICOND_mean")
+  COND_matrix <- rbind(COND_matrix, plot_matrix)
+}
+COND_matrix <- as.data.frame(COND_matrix)
+COND_matrix[,3][is.na(COND_matrix[,3])] <- average_Site_Condition
+
+# Merge the tree database and the condition table database
+Merged_TREE_COND <- merge(tree_data_Selectspp, COND_matrix, "PLT_CN", by.y = "PLT_CN")
+Merged_NAs_TREEs <- Merged_TREE_COND[!complete.cases(Merged_TREE_COND),]
+length(unique(Merged_TREE_COND$PLT_CN))
+# Check how many PLT_CNs we lost
+unique_PLT_CN_end_COND <- length(unique(Merged_TREE_COND$PLT_CN))
+
+# Remove some objects to free up memory
+# rm(COND_all, COND_only_years, COND_only_forests, COND_matrix, NC_COND, GA_COND, VA_COND, SC_COND, TN_COND)
+
+# Read in TREE tables for information on the stands
+# GA_TREE <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/GA_TREE.csv")
+# NC_TREE <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/NC_TREE.csv")
+# SC_TREE <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/SC_TREE.csv")
+# TN_TREE <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/TN_TREE.csv")
+# VA_TREE <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/TREE/VA_TREE.csv")
+
+# write_csv(TREEtbl_all, "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Treetbl_all.csv")
+
+# TREEtbl_all <- rbind(GA_TREE, NC_TREE, SC_TREE, TN_TREE, VA_TREE)
+# rm(GA_TREE, NC_TREE, SC_TREE, TN_TREE, VA_TREE, GA_COND, NC_COND, SC_COND, TN_COND, VA_COND)
+# Only get the columns that we need
+Shorter <- TREEtbl_all[,c(2,4,5,7,8,9,10,121)]
+# Convert all the columns from integer to numeric (double)
+Shorter <- sapply(Shorter, as.numeric)
+# Convert back to a data.frame, not sure why this even happened
+Shorter <- as.data.frame(Shorter)
+# Merge the two data frames
+withcarbon <- merge(Merged_TREE_COND, Shorter, by = c("PLT_CN", "STATECD", "COUNTYCD", "INVYR", "PLOT", "SUBP", "TREE"))
+plot(withcarbon$CARBON_AG ~ withcarbon$DIA)
+Merged_Tree_COND <-  withcarbon
+# Filter out rows that have a 0 ABG C value
+# tree_data_final <- subset(Merged_Tree_COND, Merged_Tree_COND[,"CARBON_AG",] > 0)
+tree_data_final <- Merged_Tree_COND
+#rm(TREEtbl_all, NC_TREE, SC_TREE, GA_TREE, TN_TREE, VA_TREE)
+subset(Merged_Tree_COND, Merged_Tree_COND[, "CARBON_AG",] == 0)
+##################
+# This is the loop to calculate all the ages of the trees
+# This function is to round up the ages of trees to a multiple of 10
+roundUP <- function(x) 10*ceiling(x/10) 
+
+# This will become the new matrix with age added to the matrix
+age_added_matrix2 <-  NULL
+
+for (each_tree in 1:nrow(tree_data_final)) {
+  #print(each_tree)
+  tree <- tree_data_final[each_tree,] # each unique tree
+  Plot <- tree["PLT_CN",] # DIA (inches)
+  H <- tree["HT"] # Height (ft)
+  SIndex <- tree["SICOND_mean"] # Site Index
+  species <- tree["SPCD"] # species numeric code
+  for (look in 1:nrow(spp_file)) {
+    # for every species in lookup table
+    sp_look <- spp_file[look, "Species"] # unique species number (from lookup table)
+    if (sp_look == species) {
+      name <- (spp_file[look, "X"]) # coefficient for b1
+      final_spp_code <- (spp_file[look, "Species"]) # coefficient for b1
+      coef_b1 <- (spp_file[look, "b1"]) # coefficient for b1
+      coef_b2 <- (spp_file[look, "b2"]) # coefficient for b2
+      coef_b3 <- (spp_file[look, "b3"]) # coefficient for b3
+      coef_b4 <- (spp_file[look, "b4"]) # coefficient for b4
+      coef_b5 <- (spp_file[look, "b5"]) # coefficient for b5
+      longevity <- (spp_file[look, "Longevity"]) # Longevity values
+      if(H <= (coef_b1*SIndex^(coef_b2))) {
+        age <- (log (1-(H/(coef_b1 * SIndex^(coef_b2)))^(1/(coef_b4*(SIndex^(coef_b5)))))/coef_b3)
+      }
+      else {age<-(log (1-(((coef_b1*SIndex^(coef_b2))-1)/(coef_b1 * SIndex^(coef_b2)))^(1/(coef_b4*(SIndex^(coef_b5)))))/coef_b3)
+      }
+      age <- as.matrix(age)
+      colnames(age) <- c("age")
+      age_rounded10_uncorrected <- roundUP(age)
+      H
+      (coef_b1*SIndex^(coef_b2))
+      if(age_rounded10_uncorrected > longevity) {
+        age_rounded10 <- longevity
+      }
+      else{age_rounded10 <- age_rounded10_uncorrected
+      }
+      age_rounded10 <- as.matrix(age_rounded10)
+      colnames(age_rounded10) <- c("age_rounded10")
+    } # closes the loop around if statement for selected species
+  } # closes loop around lookup table
+  age_added_to_tree <- cbind.data.frame(tree, name, final_spp_code, age, age_rounded10)
+  age_added_matrix2 <- rbind(age_added_matrix2, age_added_to_tree) # row bind tree with calc_age to next row. This is the final matrix
+}
+age_added_matrix2[age_added_matrix$SPCD == "131",]
+length(unique(age_added_matrix2$SPCD))
+length(unique(age_added_matrix2$PLT_CN))
+
+# write_csv(age_added_matrix2, "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Sorensen_FIA_TREE_HT_AGE.csv")
+```
+
+
+
+```{r}
+AgeGraphs <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Sorensen_FIA_TREE_HT_AGE.csv")
+Crosswalk <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Output.csv")
+Plts <- unique(AgeGraphs$PLT_CN)
+
+# Turn DIA to BA
+BAperha <- (((AgeGraphs$DIA)^2)*0.005454)*AgeGraphs$TPA_UNADJ
+AgeGraphs$BAperha <- BAperha
+
+output <- NULL
+# This loop aggregates the FIA Plots Age and Biomass by species in plts
+for (i in 1:length(Plts)) {
+  One <- as.data.frame(AgeGraphs[AgeGraphs$PLT_CN==Plts[i],])
+  plt <- Plts[i]
+  IC <- aggregate(round(One$CARBON_AG), by = list(SPCD=One$SPCD, Age = as.numeric(One$age_rounded10), BAperha = One$BAperha), FUN = sum)
+  IC$PLT_CN <- plt
+  colnames(IC) <- c("SPCD", "AGE", "Basal_Area", "AboveGround Carbon", "PLT_CN")
+  output <- rbind(IC, output)
+}
+
+# Check the carbon and age ratios
+sp <- unique(output$SPCD)
+colnames(Crosswalk) <- c("Cell", "PLT_CN", "index")
+uniquespps <- unique(output$SPCD)
+One <- as.data.frame(output)
+IC_under <- aggregate(One$Basal_Area, by = list(SPCD = One$SPCD, PLT_CN=One$PLT_CN), FUN = sum)
+
+CellswithValues <- plyr::join(Crosswalk, IC_under, by = "PLT_CN")
+
+# nrow(CellswithValues) - nrow(cr_bi)
+
+Sp <- unique(CellswithValues$SPCD)
+Sp <- Sp[!is.na(Sp)]
+CellswithValues$SPCD[is.na(CellswithValues$SPCD)] <- 0
+colnames(CellswithValues) <- c("Cell", "PLT_CN", "Index", "SPCD", "BA")
+totalBA <- sum(!is.na(CellswithValues$BA))
+```
+
+Here are the results of that association
+
+```{r}
+par(mfrow = c(5,5))
+for (i in sp){
+  dsa <- output[output$SPCD == i,]
+  Name <- as.character(SPLUT$LANDIS_CODE[SPLUT$Species == i])
+  plot(dsa$`AboveGround Carbon` ~ dsa$AGE, main = Name, xlab= "Age", ylab = "Carbon g", col = "darkgreen")
+}
+
+```
+
+
+```{r}
+# Replace carbon values that are below 10 with a minimum value of 10
+output$`AboveGround Carbon`[output$`AboveGround Carbon`<10] <- 10
+# Read in Crosswalk
+Crosswalk <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Output.csv")
+colnames(Crosswalk) <- c("Cell", "PLT_CN", "index")
+# TPA conversion factor found in FIA ############ MIGHT NEED TO CHANGE BASED ON FUTURE CHANGES
+TPA.factor <- 6.018046
+# number to convert from lbs/acre to g/m2
+conv.factor <- 0.112085
+# Select the columns that we need
+fia.cohort.plot <- AgeGraphs[,c(1,6,9,2,16,20,21,10)]
+# Calculate the aboveground C
+fia.cohort.plot$CARBON_AG <- round(fia.cohort.plot$CARBON_AG)*TPA.factor*conv.factor*2
+
+# Remove round up to 20
+fia.cohort.plot$CARBON_AG[fia.cohort.plot$CARBON_AG <= 20] <- 20
+fia.cohort.plot <- fia.cohort.plot[complete.cases(fia.cohort.plot),]
+# Bring in SpeciesLUT with LANDIS codenames
+SpeciesLUT <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Age_From_FIA/SpeciesLUT.csv")
+colnames(SpeciesLUT)[2] <- "SPCD"
+# Select just the SPCD and LANDIS code columns
+SpeciesLUT.merge <- SpeciesLUT[, c(2,13)]
+# Merge Plots and Species LUT
+PLT_CN <- unique(fia.cohort.plot$PLT_CN)
+fia.cohort.plot.with.names <- merge(fia.cohort.plot, SpeciesLUT.merge, by = "SPCD")
+MapCode <- as.numeric(1:length(PLT_CN))
+mapcode.plots <- cbind(PLT_CN, MapCode)
+# MapPlotcodemerge
+fia.ic.merge <- merge(fia.cohort.plot.with.names, mapcode.plots, by = "PLT_CN")
+fia.ic.merge <- fia.ic.merge[order(-fia.ic.merge$MapCode),]
+fia.ic.merge <- as.data.frame(fia.ic.merge)
+carbon <- as.data.frame(fia.ic.merge$CARBON_AG*conv.factor)
+# Output File
+IC.output.file <- read_table("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Initial_Communities_NULL.txt")
+
+
+# IC files text writing
+Log <- NULL
+for (l in 1:length(unique(fia.ic.merge$MapCode))){# Loop for individual mapcode
+  ic.mapcode.select <- subset(fia.ic.merge, fia.ic.merge$MapCode == l)
+  IC.mapcode <- noquote(paste("MapCode ", l))
+  cat(NULL, file = IC.output.file, "\n", append = TRUE) # Write blank space
+  cat(IC.mapcode, file = IC.output.file, "\n", append = TRUE) # Write mapcode
+  for (k in 1:length(unique(ic.mapcode.select$LANDIS_CODE))) {# Loop for individual species
+    ic.spp.select <- subset(ic.mapcode.select, ic.mapcode.select$LANDIS_CODE == k)
+    ic.cohort.biomass.list <- NULL
+    ic.spp.list <- NULL
+    for (m in unique(ic.spp.select$age_rounded_10)){
+      ic.cohort.select <- subset(ic.spp.select, ic.spp.select$age_rounded_10 == m)
+      ic.cohort.biomass.lbs <- as.numeric(sum(ic.cohort.select$CARBON_AG)) # Converting to numeric
+      ic.cohort.biomass.gm.expand <- ic.cohort.biomass.lbs
+      ic.cohort.biomass.gm <- ic.cohort.biomass.gm.expand
+      ic.cohort.biomass <- paste(m, "(", round(ic.cohort.biomass.gm), ")", sep = "")
+      logrow <- cbind(k,m,ic.cohort.biomass.gm)
+      Log <- rbind(Log, logrow)
+      ic.cohort.biomass.list<- c(ic.cohort.biomass.list, ic.cohort.biomass)
+      indent <- noquote("      ")
+      ic.spp.list <- c(indent, k, ic.cohort.biomass.list)
+      #cat(ic.cohort.biomass.list, file = IC.output.file, "\n", append = TRUE)
+    }
+    cat(ic.spp.list, file = IC.output.file, "\n", append = TRUE)
+  }
+}
+
+
+IC_in <- read_csv(paste("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Initial_Communities.txt"))
+colnames(IC_in) <- c("Initial Community")
+kable(IC_in[c(0:20),], caption = "Species Names and FS numbers", align = c('l'))
+
+
+
+### Make a csv
+### Columns
+### No heading, MapCode, SpeciesName, CohortAge, CohortBiomass
+### Integer, Integers for MapCode, SpeciesName in the species table, integer, float (double)
+
+# write.table(climate,  
+#             paste0("./", new_folder_name, climate_filename),
+#             sep = ",",
+#             col.names = FALSE,
+#             row.names = FALSE,
+#             quote = FALSE)
+
+# writeRaster(root_raster, "./Models/LANDIS inputs/input rasters/coarse_roots.tif", datatype = "INT2S", NAvalue = 0, overwrite = TRUE)
+
+# landis may not like csv head/footer
+# landis may not like datatype if it think it'sd a float but there are 1s (make it 1.0 to be sure)
+# landis will want datatype specified and my nas values
+```
+
+
+
+```{r}
+# Merge MapCodes with the other important data
+MapcodeMap <- merge(CellswithValues, mapcode.plots, by = "PLT_CN", all = TRUE)
+# Assign a value of -1 to NA values within the raster
+MapcodeMap$MapCode[is.na(MapcodeMap$MapCode)] <- (-1)
+# Order the values of the table by cell
+MapcodeMap2 <- MapcodeMap[order(MapcodeMap$Cell),]
+
+length(unique(MapcodeMap2$PLT_CN))
+# Plots <- MapcodeMap2$MapCode
+# Remove duplicated cells so that we can isolate a singlar cell to a MapCode
+MapcodeMap3 <- MapcodeMap[!duplicated(MapcodeMap$Cell),]
+MapcodeMap3 <- MapcodeMap3 %>%
+  filter(MapCode != 4681)
+# Load in an example raster of what the end product should look like
+ExampleRaster <- raster("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Piedmont Raster Layers/s110.tif")
+# Rename the example raster
+MapCode_raster <- ExampleRaster
+# Rewrite the values in the raster to the appropriate MapCode
+values(MapCode_raster)[MapcodeMap3$Cell] <- MapcodeMap3$MapCode
+# Plot the raster
+plot(MapCode_raster)
+
+# Check the arrangement of cells to see if the MapCodes and species distributions match up
+# Filter for just Loblolly Pine
+MapcodeMap4 <- MapcodeMap2 %>%
+  filter(SPCD == 131)
+# Create raster out of just the Loblolly Mapcodes
+LoblollyRaster <- terra::classify(rast(MapCode_raster), cbind(MapcodeMap4$MapCode, MapcodeMap4$BA), others = NA)
+plot(LoblollyRaster)
+plot(MapCode_raster)
+
+# Create output table that will be fed into LANDIS
+options(scipen = 999)
+
+values(LoblollyRaster)
+#writeRaster(MapCode_raster, filename = "MapCode_raster", format = "GTiff", overwrite = T)
+
+```
+
+```{r}
+# Create vector with a list of the PLT_CNs from MapcodeMap2
+options(scipen = 999)
+MCM_PLT_CN <- as.data.frame(MapcodeMap2$PLT_CN)
+# Change column name
+colnames(MCM_PLT_CN)[1] <- "PLT_CN"
+# Turn column into a character so that it can be filtered
+MCM_PLT_CN$PLT_CN <- as.character(MCM_PLT_CN$PLT_CN)
+# Filter the TREEtbl_all table which has tree level data from the FIA TREE table from our 5 states (NC, SC, GA, VA & TN)
+site_biomass <- TREEtbl_all %>%
+  filter(as.character(PLT_CN) %in% MCM_PLT_CN$PLT_CN)
+site_biomass <- as.data.table(site_biomass)
+# Filter to just the columns we need
+site_biomass$PLT_CN <- as.numeric(site_biomass$PLT_CN)
+site_biomass <- site_biomass[, c(2,4,5,7,8,9,10,16,111,158)]
+# Create table with the rounded age of trees and also other columns that will be used for merging
+age_table <- age_added_matrix2[,c(1,2,3,4,5,6,7,10,20)]
+# Merge site_biomass and age tables
+site_biomass <- as.data.frame(merge(site_biomass, age_table, by = c("PLT_CN", "INVYR", "STATECD", "COUNTYCD", "PLOT", "SUBP", "TREE", "SPCD")))
+# Create breaks that will be used in binning
+breaks <- seq(0, max(site_biomass$age_rounded10) + (10 - max(site_biomass$age_rounded10) %% 10), by = 5)
+# Calculate site biomass for each cohort
+site_biomass <- site_biomass %>%
+  mutate(biomass_area = DRYBIO_AG * TPA_UNADJ) %>%
+  mutate(bin = base::cut(age_rounded10, breaks = breaks, labels = breaks[-1], right = TRUE)) %>%
+  mutate(bin = as.integer(as.character(bin))) %>%
+  group_by(PLT_CN, SPCD, bin) %>%
+  summarise(biomass = sum(biomass_area)) %>%
+  mutate(biomass = round(biomass, digits = 0)) %>%
+  mutate(biomass = biomass * 0.11) # convert to g/m2 from lb/ac
+# Change names in site_biomass table
+names(site_biomass) <- c("PLT_CN", "SPCD", "CohortAge", "CohortBiomass")
+# Calculate the total biomass by summing the CohortBiomasses together
+site_total_biomass <- site_biomass %>%
+  group_by(PLT_CN) %>%
+  summarise(total_biomass = sum(CohortBiomass)) %>%
+  mutate(total_biomass_tonnes_ha = total_biomass * 0.01) # convert to tonnes ha-1
+# Create table with PLT_CNs and MapCodes to be used later on in joins etc.
+MapCodes_PLTCNs <- MapcodeMap2[, c("PLT_CN", "MapCode")]
+# Import USDA plant codes to be used in the final LANDIS file
+USDA_CODES <- read_csv("/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/USDA Piedmont Plant Codes.csv")
+# Merge 
+Final_table <- merge(site_biomass, MapCodes_PLTCNs, by = "PLT_CN")
+# Filter for unique rows because there are a bunch of duplicates
+Final_table <- unique(Final_table)
+# Load in USDA species codes and just the columns that we want
+spp_codes <- USDA_CODES[, c("Symbol", "SPCD")]
+# Merge with spp_codes so that the tables are combined
+Final_table <- merge(Final_table, spp_codes, by = "SPCD")
+# Remove excess columns
+Final_table <- Final_table[, -c(1:2)]
+# Add column with a series of sequential numbers
+Final_table <-Final_table %>%
+  mutate(ID = row_number())
+# Rearrange the columns
+Final_table <- Final_table[, c(5,3,4,1,2)]
+# Rename the columns
+names(Final_table) <- c("", "MapCode", "SpeciesName", "CohortAge", "CohortBiomass")
+Final_table$MapCode <- as.integer(Final_table$MapCode)
+# Create a table that has the average biomass based upon grouped by the CohortAge and SpeciesName
+final_averages <- Final_table[,c(2:5)] %>%
+  group_by(CohortAge, SpeciesName) %>%
+  summarise(average = mean(CohortBiomass))
+# merge this table with the Final_table
+Final_table <- left_join(Final_table, final_averages, by = c("CohortAge", "SpeciesName"))
+# Replace 0s with the average values that we just made
+Final_table$CohortBiomass <- if_else(Final_table$CohortBiomass == 0, Final_table$average, Final_table$CohortBiomass)
+# Fill in 0s with a minimum value of g/m2 (CohortAge * 10) beacuse some averages weres till 0
+Final_table$CohortBiomass <- if_else(Final_table$MapCode > 0 & Final_table$CohortBiomass == 0, Final_table$CohortAge*10, Final_table$CohortBiomass)
+# Remove the average column
+Final_table <- Final_table[,-6]
+### No heading, MapCode, SpeciesName, CohortAge, CohortBiomass
+
+# write_csv(Final_table, "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Final_table.csv")
+
+unique(Final_table$SpeciesName)
+```
+
+# Deadwood
+
+```{r}
+# Get FIA datatables that we need
+# getFIA(states = c("GA", "VA", "NC", "SC", "TN"),
+#        tables = c('DWM_COARSE_WOODY_DEBRIS', 'DWM_FINE_WOODY_DEBRIS'),
+#        dir = "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Deadwood",
+#        load = F)
+# getFIA(states = c("GA", "VA", "NC", "SC", "TN"),
+#        tables = c("COND_DWM_CALC"),
+#        dir = "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Deadwood",
+#        load = F)
+# Filter for just the PLT_CNs that we want from the 5 States (NC, SC, TN, GA, VA)
+Deadwood <- COND_all %>%
+  filter(as.character(PLT_CN) %in% as.character(MapCodes_PLTCNs$PLT_CN))
+# Read in the FIA tables that were just downloaded. Also calculate the total amount of biomass in each plot
+Downed_Woody_Material <- readFIA(dir = "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/Parameterisation/Initial Communities/Data/Deadwood",
+        tables = c("DWM_COARSE_WOODY_DEBRIS")) %>%
+  '[['('DWM_COARSE_WOODY_DEBRIS') %>%
+  dplyr::filter(as.character(PLT_CN) %in% as.character(Deadwood$PLT_CN)) %>%
+  dplyr::group_by(PLT_CN) %>%
+  dplyr::summarise(total_cwd = sum(DRYBIO_AC_PLOT)) %>%
+  dplyr::left_join(dplyr::select(site_total_biomass, c("PLT_CN", "total_biomass")),
+                   by = c("PLT_CN" = "PLT_CN"))
+# Join the coarse woody debris table to the site_total_biomass table
+Downed_Woody_Material <- left_join(Downed_Woody_Material, site_total_biomass, by = c("PLT_CN", "total_biomass"))
+# Plot the data to visualise the relationship between total biomass and coarse woody debris
+plot(Downed_Woody_Material$total_cwd ~ Downed_Woody_Material$total_biomass)
+abline(coef(lm(Downed_Woody_Material$total_cwd ~ Downed_Woody_Material$total_biomass)))
+# Add g/m2 column for the deadwood
+Downed_Woody_Material <- Downed_Woody_Material %>%
+  mutate(g_m2 = total_cwd * 0.1121)
+# Look at the output of a linear model to see what the relationship between the two variables is
+summary(lm(g_m2 ~ total_biomass +  0, data = Downed_Woody_Material))
+# Add column of the predicted coarse woody debris based upon the linear regression we just ran
+site_total_biomass <- site_total_biomass %>%
+  mutate(predicted_cwd = (total_biomass*0.1121)* 0.23010)
+# Filter out values that are below 10g/m2
+CWD_filtered <- site_total_biomass[site_total_biomass$predicted_cwd >= 10,]
+# Create a deadwood raster out of the mapcode raster
+Deadwood_raster <- MapCode_raster
+# Replace values with the predicted CWD score
+values(Deadwood_raster)[MapcodeMap3$Cell] <- site_total_biomass$predicted_cwd
+# Plot the deadwood raster
+plot(Deadwood_raster)
+# Filter out values that are below 10g/m2
+values(Deadwood_raster)[values(Deadwood_raster) < 10] = NA
+# Convert raster to points to be used in interpolation later on
+Deadwood_Points <- rasterToPoints(Deadwood_raster)
+# Convert to a data frame
+Deadwood_Points <- as.data.frame(Deadwood_Points)
+# Chane column name to g_m2
+colnames(Deadwood_Points)[3] <- "g_m2"
+
+# write_csv(Deadwood_Points, "/Users/louisgoodall/Desktop/Deadwood_Points.csv")
+# 
+# writeRaster(Deadwood_raster, "/Users/louisgoodall/Desktop/Deadwood_raster.tif", overwrite = T)
+
+```
+
+
+
+
+### Make a csv
+### Columns
+### No heading, MapCode, SpeciesName, CohortAge, CohortBiomass
+### Integer, Integers for MapCode, SpeciesName in the species table, integer, float (double)
+
+# write.table(climate,  
+#             paste0("./", new_folder_name, climate_filename),
+#             sep = ",",
+#             col.names = FALSE,
+#             row.names = FALSE,
+#             quote = FALSE)
+
+# writeRaster(root_raster, "./Models/LANDIS inputs/input rasters/coarse_roots.tif", datatype = "INT2S", NAvalue = 0, overwrite = TRUE)
+
+# landis may not like csv head/footer
+# landis may not like datatype if it think it'sd a float but there are 1s (make it 1.0 to be sure)
+# landis will want datatype specified and my nas values
+
+
+
+
+
+
+
+
+
 
